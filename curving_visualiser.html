@@ -61,7 +61,7 @@
 
         <div class="controls-section">
             <h2>Data Loading</h2>
-            <p id="loadingMessage">Loading data... Ensure your files are in './curving_data/' and listed in the script. Run this page via a local web server.</p>
+            <p id="loadingMessage">Loading data... Ensure 'file_index.json' exists in './curving_data/' and lists your data files. Run this page via a local web server.</p>
             <div id="selectors" class="hidden">
                 <label for="yearSelector">Select Primary Year:</label>
                 <select id="yearSelector"></select>
@@ -120,22 +120,13 @@
         let curveChartInstance2 = null;
         const DEFAULT_YEAR = "DefaultYear"; 
         const DATA_FOLDER_PATH = './curving_data/';
-
-        // --- IMPORTANT: UPDATE THIS LIST WITH YOUR FILENAMES ---
-        const PREDEFINED_DATA_FILES = [
-            "2024_math_curves.csv", // Example: replace with your actual filenames
-            "2023_physics_curves.txt",
-            "another_exam_data.csv"
-            // Add all files you want to load from ./curving_data/
-        ];
-        // --- END OF IMPORTANT LIST ---
-
+        const INDEX_FILE_NAME = 'file_index.json'; // Or 'file_list.txt' if you prefer plain text
 
         // DOM Element References
         const loadingMessageP = document.getElementById('loadingMessage');
         const yearSelector = document.getElementById('yearSelector');
-        const examSelector = document.getElementById('examSelector'); // Exam 1
-        const examSelector2 = document.getElementById('examSelector2'); // Exam 2
+        const examSelector = document.getElementById('examSelector'); 
+        const examSelector2 = document.getElementById('examSelector2'); 
         const selectorsDiv = document.getElementById('selectors');
         const visualisationAndCalculationsDiv = document.getElementById('visualisationAndCalculations');
         const calculationSectionDiv = document.getElementById('calculationSection');
@@ -166,7 +157,7 @@
         ];
 
         // Event Listeners
-        window.addEventListener('DOMContentLoaded', loadDataFromPredefinedFiles); // Load data on page load
+        window.addEventListener('DOMContentLoaded', loadDataViaIndexFile); 
         yearSelector.addEventListener('change', populateExamSelector);
         examSelector.addEventListener('change', displaySelectedExamData); 
         calculateCurvedButton.addEventListener('click', calculateAndDisplayCurvedMark);
@@ -175,54 +166,66 @@
         plotTwoSubjectsButton.addEventListener('click', plotTwoSubjectsComparison);
 
         /**
-         * Loads data from files specified in PREDEFINED_DATA_FILES array.
+         * Loads data by first fetching an index file (e.g., file_index.json)
+         * which lists the actual data files to be fetched and processed.
          */
-        async function loadDataFromPredefinedFiles() {
+        async function loadDataViaIndexFile() {
             parsedData = {};
-            resetUIOnNewLoad(); // Resets UI elements
-            loadingMessageP.textContent = "Loading data from predefined files...";
-
-            if (PREDEFINED_DATA_FILES.length === 0) {
-                loadingMessageP.textContent = "No data files predefined in the script. Please update PREDEFINED_DATA_FILES array.";
-                return;
-            }
-
-            let anyFileHadValidData = false;
-            const fetchPromises = PREDEFINED_DATA_FILES.map(fileName => {
-                const filePath = DATA_FOLDER_PATH + fileName;
-                return fetch(filePath)
-                    .then(response => {
-                        if (!response.ok) {
-                            throw new Error(`HTTP error! status: ${response.status} for file ${fileName}`);
-                        }
-                        return response.text();
-                    })
-                    .then(csvText => {
-                        try {
-                            const fileHadData = processSingleCSVText(csvText, fileName);
-                            if (fileHadData) anyFileHadValidData = true;
-                        } catch (processError) {
-                            console.error(`Error processing content of ${fileName}:`, processError);
-                            // Optionally, inform user about specific file processing error
-                        }
-                    })
-                    .catch(fetchError => {
-                        console.error(`Error fetching ${filePath}:`, fetchError);
-                        // Optionally, inform user about specific file fetching error
-                    });
-            });
+            resetUIOnNewLoad();
+            loadingMessageP.textContent = `Loading index file (${INDEX_FILE_NAME})...`;
 
             try {
+                const indexResponse = await fetch(DATA_FOLDER_PATH + INDEX_FILE_NAME);
+                if (!indexResponse.ok) {
+                    throw new Error(`Could not load index file '${INDEX_FILE_NAME}'. Status: ${indexResponse.status}`);
+                }
+                
+                const dataFileNames = await indexResponse.json(); // Assumes index file is JSON array of strings
+                // If using a plain text file with one filename per line:
+                // const text = await indexResponse.text();
+                // const dataFileNames = text.trim().split('\n').map(name => name.trim()).filter(name => name);
+
+                if (!Array.isArray(dataFileNames) || dataFileNames.length === 0) {
+                    loadingMessageP.textContent = `Index file '${INDEX_FILE_NAME}' is empty or not a valid list.`;
+                    return;
+                }
+                loadingMessageP.textContent = `Loading data from ${dataFileNames.length} file(s) listed in index...`;
+
+                let anyFileHadValidData = false;
+                const fetchPromises = dataFileNames.map(fileName => {
+                    const filePath = DATA_FOLDER_PATH + fileName;
+                    return fetch(filePath)
+                        .then(response => {
+                            if (!response.ok) {
+                                console.warn(`Could not load data file '${fileName}'. Status: ${response.status}`);
+                                return null; // So Promise.all doesn't reject immediately
+                            }
+                            return response.text();
+                        })
+                        .then(csvText => {
+                            if (csvText === null) return;
+                            try {
+                                const fileHadData = processSingleCSVText(csvText, fileName);
+                                if (fileHadData) anyFileHadValidData = true;
+                            } catch (processError) {
+                                console.error(`Error processing content of ${fileName}:`, processError);
+                            }
+                        })
+                        .catch(fetchError => {
+                            console.error(`Error fetching ${filePath}:`, fetchError);
+                        });
+                });
+
                 await Promise.all(fetchPromises);
-            } catch (error) {
-                // This catch is for Promise.all itself, though individual errors are caught above
-                console.error("Error during fetching/processing of some files:", error);
-            } finally {
                 finalizeDataLoadingUIUpdates(anyFileHadValidData);
+
+            } catch (error) {
+                console.error("Error loading or processing index file:", error);
+                loadingMessageP.textContent = `Error: ${error.message}. Ensure '${INDEX_FILE_NAME}' is in '${DATA_FOLDER_PATH}' and is a valid JSON array of filenames.`;
             }
         }
         
-        function resetUIOnNewLoad() { // Renamed from resetUIOnNewUpload
+        function resetUIOnNewLoad() { 
             selectorsDiv.classList.add('hidden');
             visualisationAndCalculationsDiv.classList.add('hidden');
             comparisonSectionUIDiv.classList.add('hidden');
@@ -239,18 +242,16 @@
             examSelector.innerHTML = '<option value="">Select Exam 1</option>';
         }
 
-        function finalizeDataLoadingUIUpdates(anyFileHadValidData) { // Renamed from finalizeFileUpload
+        function finalizeDataLoadingUIUpdates(anyFileHadValidData) { 
             if (anyFileHadValidData && Object.keys(parsedData).length > 0) {
                 loadingMessageP.textContent = "Data loaded successfully.";
-                setTimeout(() => { loadingMessageP.classList.add('hidden'); }, 2000); // Hide message after a delay
+                setTimeout(() => { loadingMessageP.classList.add('hidden'); }, 2000); 
                 selectorsDiv.classList.remove('hidden');
                 populateYearSelector();
             } else {
-                loadingMessageP.textContent = "Failed to load valid data. Check console for errors and ensure files are correctly placed and listed.";
-                // Do not hide the message if loading failed.
+                loadingMessageP.textContent = "Failed to load valid data from files listed in index. Check console for errors.";
             }
         }
-
 
         function processSingleCSVText(csvText, fileName) {
             let fileContainedData = false;
@@ -327,7 +328,7 @@
             if (years.length === 0) selectorsDiv.classList.add('hidden');
         }
 
-        function populateExamSelector() { // For Exam 1
+        function populateExamSelector() { 
             examSelector.innerHTML = '<option value="">Select Exam 1</option>';
             const selectedYear = yearSelector.value;
             if (selectedYear && parsedData[selectedYear]) {
@@ -352,7 +353,7 @@
             return (year && exam && parsedData[year] && parsedData[year][exam]) ? parsedData[year][exam] : null;
         }
 
-        function displaySelectedExamData() { // For Exam 1
+        function displaySelectedExamData() { 
             const primaryYear = yearSelector.value;
             const selectedExam1 = examSelector.value;
             const points = getCurrentPoints(primaryYear, selectedExam1);

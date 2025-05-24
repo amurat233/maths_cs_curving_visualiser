@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grade Curve Visualiser</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
+        .container { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        h1, h2, h3 { color: #333; }
+        label { display: block; margin-top: 10px; margin-bottom: 5px; font-weight: bold; }
+        input[type="file"], select, input[type="number"], button {
+            padding: 10px;
+            margin-bottom: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+            width: calc(100% - 22px); /* Adjust for padding and border */
+            max-width: 350px; /* Max width for inputs */
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover { background-color: #0056b3; }
+        .inline-inputs label, .inline-inputs input, .inline-inputs button, .inline-inputs span {
+            margin-right: 10px;
+            width: auto; /* Override width for inline elements */
+        }
+        #curvedMarkResult, #rawMarkResult { font-weight: bold; color: #28a745; }
+        #chartContainer { margin-top: 20px; max-width: 700px; }
+        .controls-section, .calculation-section, .comparison-section { 
+            margin-bottom: 20px; 
+            padding-bottom: 20px; 
+            border-bottom: 1px solid #eee; 
+        }
+        .comparison-section div { margin-bottom: 5px;}
+        .comparison-section label { display: inline-block; margin-right: 10px; font-weight: normal;}
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Grade Curve Visualiser</h1>
+
+        <div class="controls-section">
+            <h2>Load Data and Select Exam</h2>
+            <label for="csvFile">Upload CSV File(s) (format: ExamName;R1:U1;R2:U2;...):</label>
+            <input type="file" id="csvFile" accept=".csv,.txt" multiple>
+
+            <div id="selectors" class="hidden">
+                <label for="yearSelector">Select Primary Year:</label>
+                <select id="yearSelector"></select>
+
+                <label for="examSelector">Select Exam:</label>
+                <select id="examSelector"></select>
+            </div>
+        </div>
+        
+        <div id="comparisonSectionUI" class="comparison-section hidden">
+            <h3>Compare Exam Across Years</h3>
+            <div id="yearCheckboxesContainer"></div>
+            <button id="plotComparisonButton">Plot Comparison</button>
+        </div>
+
+        <div id="visualisationAndCalculations" class="hidden">
+            <div id="calculationSection" class="calculation-section">
+                <h2>Calculations (for Primary Selected Year)</h2>
+                <div class="inline-inputs">
+                    <label for="rawMark">Raw Mark:</label>
+                    <input type="number" id="rawMark" min="0" step="0.1">
+                    <button id="calculateCurved">Get Curved Mark</button>
+                    <span id="curvedMarkResult"></span>
+                </div>
+                <div class="inline-inputs" style="margin-top:15px;">
+                    <label for="curvedMarkInput">Curved Mark:</label>
+                    <input type="number" id="curvedMarkInput" min="0" step="0.1">
+                    <button id="calculateRaw">Get Raw Mark(s)</button>
+                    <span id="rawMarkResult"></span>
+                </div>
+            </div>
+
+            <div id="chartContainer">
+                <h2 id="chartTitle">Curving Visualisation</h2>
+                <canvas id="curveChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let parsedData = {}; // Structure: { "year": { "examName": [{r: raw, u: curved}, ...], ... }, ... }
+        let curveChartInstance = null;
+        const DEFAULT_YEAR = "DefaultYear"; // Default year if not specified in CSV data or filename
+
+        // DOM Element References
+        const csvFileInput = document.getElementById('csvFile');
+        const yearSelector = document.getElementById('yearSelector');
+        const examSelector = document.getElementById('examSelector');
+        const selectorsDiv = document.getElementById('selectors');
+        const visualisationAndCalculationsDiv = document.getElementById('visualisationAndCalculations');
+        const calculationSectionDiv = document.getElementById('calculationSection');
+        const chartTitleH2 = document.getElementById('chartTitle');
+        
+        const comparisonSectionUIDiv = document.getElementById('comparisonSectionUI');
+        const yearCheckboxesContainerDiv = document.getElementById('yearCheckboxesContainer');
+        const plotComparisonButton = document.getElementById('plotComparisonButton');
+
+        const rawMarkInput = document.getElementById('rawMark');
+        const calculateCurvedButton = document.getElementById('calculateCurved');
+        const curvedMarkResultSpan = document.getElementById('curvedMarkResult');
+        const curvedMarkInput = document.getElementById('curvedMarkInput');
+        const calculateRawButton = document.getElementById('calculateRaw');
+        const rawMarkResultSpan = document.getElementById('rawMarkResult');
+
+        const CHART_COLORS = [
+            'rgb(255, 99, 132)', 'rgb(54, 162, 235)', 'rgb(255, 205, 86)', 
+            'rgb(75, 192, 192)', 'rgb(153, 102, 255)', 'rgb(255, 159, 64)',
+            'rgb(201, 203, 207)', 'rgb(255, 0, 0)', 'rgb(0, 255, 0)', 'rgb(0, 0, 255)'
+        ];
+
+        // Event Listeners
+        csvFileInput.addEventListener('change', handleFileUpload);
+        yearSelector.addEventListener('change', populateExamSelector);
+        examSelector.addEventListener('change', displaySelectedExamData);
+        calculateCurvedButton.addEventListener('click', calculateAndDisplayCurvedMark);
+        calculateRawButton.addEventListener('click', calculateAndDisplayRawMark);
+        plotComparisonButton.addEventListener('click', plotComparisonChart);
+
+
+        function handleFileUpload(event) {
+            const files = event.target.files;
+            if (!files.length) return;
+            parsedData = {};
+            resetUIOnNewUpload();
+            let filesProcessedCount = 0;
+            let anyFileHadValidData = false;
+
+            Array.from(files).forEach(file => {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    try {
+                        const fileHadData = processSingleCSVText(e.target.result, file.name);
+                        if (fileHadData) anyFileHadValidData = true;
+                    } catch (error) {
+                        console.error("Error processing CSV:", file.name, error);
+                        alert(`Error processing CSV file ${file.name}.\n${error.message}`);
+                    }
+                    filesProcessedCount++;
+                    if (filesProcessedCount === files.length) {
+                        finalizeFileUpload(anyFileHadValidData);
+                    }
+                };
+                reader.onerror = function() {
+                    alert(`Error reading file ${file.name}.`);
+                    filesProcessedCount++;
+                    if (filesProcessedCount === files.length) {
+                        finalizeFileUpload(anyFileHadValidData);
+                    }
+                };
+                reader.readAsText(file);
+            });
+        }
+
+        function resetUIOnNewUpload() {
+            selectorsDiv.classList.add('hidden');
+            visualisationAndCalculationsDiv.classList.add('hidden');
+            comparisonSectionUIDiv.classList.add('hidden');
+            yearCheckboxesContainerDiv.innerHTML = '';
+            if (curveChartInstance) curveChartInstance.destroy();
+            curvedMarkResultSpan.textContent = "";
+            rawMarkResultSpan.textContent = "";
+            yearSelector.innerHTML = '<option value="">Select Primary Year</option>';
+            examSelector.innerHTML = '<option value="">Select Exam</option>';
+        }
+
+        function finalizeFileUpload(anyFileHadValidData) {
+            if (anyFileHadValidData && Object.keys(parsedData).length > 0) {
+                selectorsDiv.classList.remove('hidden');
+                populateYearSelector();
+            } else {
+                alert("No valid curving data found in the uploaded file(s). Please ensure files use 'ExamName;Raw1:Curved1;Raw2:Curved2...' format and contain valid numbers.");
+            }
+        }
+
+        function processSingleCSVText(csvText, fileName) {
+            let fileContainedData = false;
+            const lines = csvText.trim().split('\n');
+            
+            let year = DEFAULT_YEAR;
+            const yearMatch = fileName.match(/\b(19|20)\d{2}\b/); // Try to find a 4-digit year in filename
+            if (yearMatch) {
+                year = yearMatch[0];
+            }
+
+            lines.forEach(line => {
+                line = line.trim();
+                if (!line) return; 
+
+                const parts = line.split(';');
+                if (parts.length < 1) { 
+                    console.warn("Skipping invalid line (no parts separated by ';'):", line);
+                    return;
+                }
+                const examName = parts[0].trim();
+                if (!examName) {
+                    console.warn("Skipping line with empty ExamName:", line);
+                    return;
+                }
+
+                let tempPoints = []; 
+                for (let i = 1; i < parts.length; i++) {
+                    const pointStr = parts[i].trim();
+                    if (!pointStr) continue; 
+                    const ru = pointStr.split(':');
+                    if (ru.length !== 2) {
+                        throw new Error(`Invalid point format "${pointStr}" for ${examName} (Year: ${year}) in line: "${line.substring(0,100)}...". Expected "Raw:Curved".`);
+                    }
+                    const r = parseFloat(ru[0]);
+                    const u = parseFloat(ru[1]);
+                    if (isNaN(r) || isNaN(u)) {
+                        throw new Error(`Invalid number in point "${pointStr}" for ${examName} (Year: ${year}) in line: "${line.substring(0,100)}...".`);
+                    }
+                    tempPoints.push({ r: r, u: u });
+                }
+                
+                let maxRawObservedInPoints = 0;
+                if (tempPoints.length > 0) {
+                    tempPoints.forEach(p => {
+                        if (p.r > maxRawObservedInPoints) maxRawObservedInPoints = p.r;
+                    });
+                }
+
+                let examScaleMaxRaw = 50; 
+                if (maxRawObservedInPoints > 50) {
+                    examScaleMaxRaw = 100;
+                }
+
+                if (examName.toUpperCase() === "BSP") {
+                    if (maxRawObservedInPoints > 0) {
+                        examScaleMaxRaw = maxRawObservedInPoints;
+                    } else if (tempPoints.length === 0) {
+                         examScaleMaxRaw = 2000; // Default for BSP if no points
+                    }
+                }
+                
+                let finalPoints = [{ r: 0, u: 0 }]; 
+                finalPoints.push(...tempPoints);
+                finalPoints.sort((a, b) => a.r - b.r); 
+                finalPoints = finalPoints.filter((point, index, self) =>
+                    index === self.findIndex((p) => p.r === point.r && p.u === point.u)
+                );
+                
+                if (finalPoints.length > 0) {
+                    const lastPointInCurrentList = finalPoints[finalPoints.length - 1];
+                    if (lastPointInCurrentList.r < examScaleMaxRaw) {
+                        finalPoints.push({ r: examScaleMaxRaw, u: 100 }); 
+                    } else if (lastPointInCurrentList.r === examScaleMaxRaw) {
+                        lastPointInCurrentList.u = 100; 
+                    }
+                     if (lastPointInCurrentList.r > examScaleMaxRaw && examName.toUpperCase() === "BSP"){
+                         lastPointInCurrentList.u = 100;
+                     }
+                } else { 
+                    finalPoints.push({ r: examScaleMaxRaw, u: 100 });
+                }
+
+                finalPoints.sort((a, b) => a.r - b.r);
+                finalPoints = finalPoints.filter((point, index, self) =>
+                    index === self.findIndex((p) => p.r === point.r && p.u === point.u)
+                );
+
+                if (finalPoints.length > 1 || (finalPoints.length === 1 && (finalPoints[0].r !== 0 || finalPoints[0].u !==0))) { 
+                    if (!parsedData[year]) {
+                        parsedData[year] = {};
+                    }
+                    parsedData[year][examName] = finalPoints;
+                    fileContainedData = true;
+                } else {
+                    console.warn(`No valid curve points constructed for ${examName} (Year: ${year}) in line:`, line);
+                }
+            });
+            return fileContainedData;
+        }
+
+        function populateYearSelector() {
+            yearSelector.innerHTML = '<option value="">Select Primary Year</option>';
+            examSelector.innerHTML = '<option value="">Select Exam</option>'; 
+            const years = Object.keys(parsedData).sort((a,b) => b.localeCompare(a)); 
+            years.forEach(year => {
+                const option = document.createElement('option');
+                option.value = year;
+                option.textContent = year;
+                yearSelector.appendChild(option);
+            });
+            if (years.length === 0) {
+                 selectorsDiv.classList.add('hidden');
+            }
+        }
+
+        function populateExamSelector() {
+            examSelector.innerHTML = '<option value="">Select Exam</option>';
+            const selectedYear = yearSelector.value;
+            if (selectedYear && parsedData[selectedYear]) {
+                const examNames = Object.keys(parsedData[selectedYear]).sort();
+                examNames.forEach(name => {
+                    const option = document.createElement('option');
+                    option.value = name;
+                    option.textContent = name;
+                    examSelector.appendChild(option);
+                });
+            }
+            visualisationAndCalculationsDiv.classList.add('hidden'); 
+            comparisonSectionUIDiv.classList.add('hidden');
+            yearCheckboxesContainerDiv.innerHTML = '';
+            if (curveChartInstance) curveChartInstance.destroy();
+            curvedMarkResultSpan.textContent = "";
+            rawMarkResultSpan.textContent = "";
+        }
+        
+        function getCurrentPoints(year, exam) { // Modified to take year and exam
+            if (year && exam && parsedData[year] && parsedData[year][exam]) {
+                return parsedData[year][exam];
+            }
+            return null;
+        }
+
+        function displaySelectedExamData() {
+            const primaryYear = yearSelector.value;
+            const selectedExam = examSelector.value;
+            const points = getCurrentPoints(primaryYear, selectedExam);
+
+            comparisonSectionUIDiv.classList.add('hidden'); // Hide comparison by default
+            yearCheckboxesContainerDiv.innerHTML = ''; // Clear old checkboxes
+
+            if (points && points.length > 0) {
+                visualisationAndCalculationsDiv.classList.remove('hidden');
+                calculationSectionDiv.classList.remove('hidden'); // Show calculations for single view
+                chartTitleH2.textContent = `Curving for ${selectedExam} (${primaryYear})`;
+                
+                const maxRawOnCurve = points[points.length-1].r;
+                rawMarkInput.max = maxRawOnCurve;
+                let maxCurvedOnCurve = 0;
+                points.forEach(p => { if (p.u > maxCurvedOnCurve) maxCurvedOnCurve = p.u; });
+                curvedMarkInput.max = Math.max(100, maxCurvedOnCurve);
+
+                drawCurveChart([{ label: `${selectedExam} (${primaryYear})`, data: points, color: CHART_COLORS[0] }]);
+                curvedMarkResultSpan.textContent = ""; 
+                rawMarkResultSpan.textContent = "";   
+
+                // Setup comparison options
+                setupComparisonCheckboxes(selectedExam, primaryYear);
+
+            } else {
+                visualisationAndCalculationsDiv.classList.add('hidden');
+                if (curveChartInstance) curveChartInstance.destroy();
+            }
+        }
+
+        function setupComparisonCheckboxes(currentExam, primaryYear) {
+            const availableYearsForExam = [];
+            Object.keys(parsedData).forEach(year => {
+                if (parsedData[year][currentExam]) {
+                    availableYearsForExam.push(year);
+                }
+            });
+            
+            availableYearsForExam.sort((a,b) => b.localeCompare(a)); // Sort years
+
+            if (availableYearsForExam.length > 1) { // Only show if there's something to compare
+                yearCheckboxesContainerDiv.innerHTML = ''; // Clear previous
+                availableYearsForExam.forEach(year => {
+                    const checkboxId = `compare-year-${year}`;
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.id = checkboxId;
+                    checkbox.value = year;
+                    checkbox.name = 'compareYears';
+                    if (year === primaryYear) {
+                        checkbox.checked = true; // Pre-check the primary selected year
+                    }
+
+                    const label = document.createElement('label');
+                    label.htmlFor = checkboxId;
+                    label.textContent = year;
+                    
+                    const div = document.createElement('div');
+                    div.appendChild(checkbox);
+                    div.appendChild(label);
+                    yearCheckboxesContainerDiv.appendChild(div);
+                });
+                comparisonSectionUIDiv.classList.remove('hidden');
+            } else {
+                comparisonSectionUIDiv.classList.add('hidden');
+            }
+        }
+
+        function plotComparisonChart() {
+            const currentExam = examSelector.value;
+            if (!currentExam) {
+                alert("Please select an exam first.");
+                return;
+            }
+
+            const selectedYearsCheckboxes = document.querySelectorAll('#yearCheckboxesContainer input[name="compareYears"]:checked');
+            if (selectedYearsCheckboxes.length === 0) {
+                alert("Please select at least one year to compare.");
+                // Optionally, revert to single view if no years are selected for comparison
+                // displaySelectedExamData(); 
+                return;
+            }
+
+            const datasets = [];
+            let colorIndex = 0;
+            selectedYearsCheckboxes.forEach(checkbox => {
+                const year = checkbox.value;
+                const points = getCurrentPoints(year, currentExam);
+                if (points) {
+                    datasets.push({
+                        label: `${currentExam} (${year})`,
+                        data: points,
+                        color: CHART_COLORS[colorIndex % CHART_COLORS.length]
+                    });
+                    colorIndex++;
+                }
+            });
+
+            if (datasets.length > 0) {
+                calculationSectionDiv.classList.add('hidden'); // Hide calculations in comparison view
+                chartTitleH2.textContent = `Comparison for ${currentExam}`;
+                drawCurveChart(datasets);
+                visualisationAndCalculationsDiv.classList.remove('hidden'); // Ensure chart area is visible
+            } else {
+                alert("No data found for the selected years to compare.");
+                // Revert to single view if no valid comparison data
+                displaySelectedExamData();
+            }
+        }
+
+
+        function drawCurveChart(datasets) { // `datasets` is now an array of {label, data, color}
+            const ctx = document.getElementById('curveChart').getContext('2d');
+            if (curveChartInstance) {
+                curveChartInstance.destroy();
+            }
+
+            let overallMaxR = 0; 
+            let overallMaxU = 0; 
+
+            const chartDatasets = datasets.map(ds => {
+                if (ds.data.length > 0) {
+                    ds.data.forEach(p => {
+                        if (p.r > overallMaxR) overallMaxR = p.r;
+                        if (p.u > overallMaxU) overallMaxU = p.u;
+                    });
+                }
+                return {
+                    label: ds.label,
+                    data: ds.data.map(p => ({x: p.r, y: p.u})),
+                    borderColor: ds.color,
+                    backgroundColor: ds.color.replace('rgb(', 'rgba(').replace(')', ', 0.2)'), // Make transparent
+                    tension: 0, 
+                    stepped: false,
+                    fill: false // No fill under the line for clearer comparison
+                };
+            });
+            
+            overallMaxR = Math.max(50, overallMaxR); 
+            overallMaxU = Math.max(100, overallMaxU); 
+            overallMaxR = overallMaxR === 0 ? 10 : Math.ceil(overallMaxR * 1.05 / 10) * 10;
+            overallMaxU = overallMaxU === 0 ? 10 : Math.ceil(overallMaxU * 1.05 / 10) * 10;
+
+            curveChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: chartDatasets
+                },
+                options: {
+                    scales: {
+                        x: {
+                            type: 'linear',
+                            title: { display: true, text: 'Raw Mark' },
+                            min: 0,
+                            max: overallMaxR
+                        },
+                        y: {
+                            type: 'linear',
+                            title: { display: true, text: 'Curved Mark (USM)' },
+                            min: 0,
+                            max: overallMaxU
+                        }
+                    },
+                    responsive: true,
+                    maintainAspectRatio: true 
+                }
+            });
+        }
+        
+        function calculateAndDisplayCurvedMark() {
+            const rawMark = parseFloat(rawMarkInput.value);
+            // Calculations are always based on the primary selected year/exam
+            const primaryYear = yearSelector.value;
+            const selectedExam = examSelector.value;
+            const points = getCurrentPoints(primaryYear, selectedExam);
+
+            if (isNaN(rawMark) || !points) {
+                curvedMarkResultSpan.textContent = "Invalid input or no primary exam selected.";
+                return;
+            }
+            const curvedMark = getCurvedMark(rawMark, points);
+            curvedMarkResultSpan.textContent = isNaN(curvedMark) ? "Error in calc" : curvedMark.toFixed(2);
+        }
+
+        function calculateAndDisplayRawMark() {
+            const curvedMark = parseFloat(curvedMarkInput.value);
+            // Calculations are always based on the primary selected year/exam
+            const primaryYear = yearSelector.value;
+            const selectedExam = examSelector.value;
+            const points = getCurrentPoints(primaryYear, selectedExam);
+
+            if (isNaN(curvedMark) || !points) {
+                rawMarkResultSpan.textContent = "Invalid input or no primary exam selected.";
+                return;
+            }
+            const rawMarkInfo = getRawMark(curvedMark, points);
+            rawMarkResultSpan.textContent = rawMarkInfo;
+        }
+
+        function getCurvedMark(rawMark, points) {
+            if (!points || points.length === 0) return NaN;
+            const minRaw = points[0].r;
+            const maxRaw = points[points.length - 1].r;
+            if (rawMark <= minRaw) return points[0].u;
+            if (rawMark >= maxRaw) return points[points.length - 1].u;
+
+            for (let i = 0; i < points.length - 1; i++) {
+                const p1 = points[i];
+                const p2 = points[i+1];
+                if (rawMark >= p1.r && rawMark <= p2.r) {
+                    if (p2.r === p1.r) return p1.u; 
+                    const slope = (p2.u - p1.u) / (p2.r - p1.r);
+                    if (isNaN(slope) || !isFinite(slope)) return p1.u; 
+                    return p1.u + slope * (rawMark - p1.r);
+                }
+            }
+            return NaN; 
+        }
+
+        function getRawMark(curvedMark, points) {
+            if (!points || points.length === 0) return "N/A";
+            let results = [];
+            const tolerance = 1e-6; 
+
+            for (let i = 0; i < points.length - 1; i++) {
+                const p1 = points[i];
+                const p2 = points[i+1];
+                if (Math.abs(p1.u - curvedMark) < tolerance && Math.abs(p2.u - curvedMark) < tolerance) {
+                    results.push(`[${p1.r.toFixed(2)} - ${p2.r.toFixed(2)}]`);
+                } 
+                else if (Math.abs(p1.u - curvedMark) < tolerance) {
+                    results.push(p1.r.toFixed(2));
+                }
+                else if (Math.abs(p2.u - curvedMark) < tolerance) {
+                     results.push(p2.r.toFixed(2));
+                }
+                else if ((curvedMark > p1.u + tolerance && curvedMark < p2.u - tolerance) || (curvedMark < p1.u - tolerance && curvedMark > p2.u + tolerance)) {
+                    if (Math.abs(p2.u - p1.u) > tolerance) { 
+                        const raw = p1.r + (curvedMark - p1.u) * (p2.r - p1.r) / (p2.u - p1.u);
+                        if (raw > p1.r + tolerance && raw < p2.r - tolerance) {
+                             results.push(raw.toFixed(2));
+                        }
+                    }
+                }
+            }
+            
+            if (points.length > 0 && Math.abs(points[points.length-1].u - curvedMark) < tolerance) {
+                const lastRawStr = points[points.length-1].r.toFixed(2);
+                let alreadyCapturedByRange = results.some(res => {
+                    if (res.startsWith("[")) {
+                        const parts = res.substring(1, res.length - 1).split(" - ");
+                        const start = parseFloat(parts[0]);
+                        const end = parseFloat(parts[1]);
+                        return (points[points.length-1].r >= start - tolerance && points[points.length-1].r <= end + tolerance);
+                    }
+                    return false;
+                });
+                if (results.indexOf(lastRawStr) === -1 && !alreadyCapturedByRange) {
+                    results.push(lastRawStr);
+                }
+            }
+
+            if (results.length === 0) {
+                const allCurvedMarks = points.map(p => p.u);
+                const minCurved = Math.min(...allCurvedMarks);
+                const maxCurved = Math.max(...allCurvedMarks);
+                if (curvedMark < minCurved - tolerance || curvedMark > maxCurved + tolerance) {
+                    return "Curved mark is out of range for this exam.";
+                }
+                return "No specific raw mark found (may fall on a vertical segment or be ambiguous).";
+            }
+            
+            const uniqueResults = [...new Set(results)];
+            uniqueResults.sort((a,b) => { 
+                const valA = parseFloat(a.startsWith("[") ? a.substring(1) : a); 
+                const valB = parseFloat(b.startsWith("[") ? b.substring(1) : b);
+                return valA - valB;
+            });
+            return uniqueResults.join(' or ');
+        }
+    </script>
+</body>
+</html>
